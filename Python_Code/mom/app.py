@@ -41,18 +41,16 @@ div.stButton > button[kind="primary"]:hover {
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 繁體中文字型載入函式 (支援雲端動態路徑與 Windows 備用)
+# 繁體中文字型載入函式 (支援雲端與本機備用)
 # ==========================================
 @st.cache_resource
 def register_pdf_font():
-    # 動態取得 app.py 所在的資料夾絕對路徑
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    # 將資料夾路徑與字型檔名結合，組裝成正確的完整路徑
     cloud_font_path = os.path.join(current_dir, 'NotoSansTC-Regular.ttf')
 
     font_configs = [
-        (cloud_font_path, None),            # [新增] 雲端專案資料夾內的思源黑體 (最優先讀取)
-        ("C:/Windows/Fonts/msjh.ttc", 0),   # 微軟正黑體 (Subfont Index 0)
+        (cloud_font_path, None),            # 專案資料夾內的思源黑體
+        ("C:/Windows/Fonts/msjh.ttc", 0),   # 微軟正黑體
         ("C:/Windows/Fonts/msjh.ttf", None),
         ("C:/Windows/Fonts/simsun.ttc", 0), # 新細明體
         ("C:/Windows/Fonts/arial.ttf", None)
@@ -72,7 +70,7 @@ def register_pdf_font():
 has_cjk_font = register_pdf_font()
 
 # ==========================================
-# 核心計算引擎 (必須放在資料初始化後、報表生成前)
+# 核心計算引擎
 # ==========================================
 def update_calculations(df, tol_mode, tol_val, includes_rinsing):
     if df.empty:
@@ -123,7 +121,7 @@ def update_calculations(df, tol_mode, tol_val, includes_rinsing):
     df['狀態'] = statuses
     return df
 
-# 1. 初始化 DataFrame
+# 初始化 DataFrame
 if 'data' not in st.session_state:
     st.session_state.data = pd.DataFrame(
         columns=[
@@ -134,7 +132,7 @@ if 'data' not in st.session_state:
     st.session_state.data['週期'] = st.session_state.data['週期'].astype(str)
 
 # ==========================================
-# 側邊欄設定 (提前獲取設定值以便計算)
+# 側邊欄設定
 # ==========================================
 st.sidebar.header('⚙️ 系統全域設定')
 
@@ -166,12 +164,11 @@ machine_uf_includes_rinsing = st.sidebar.checkbox(
     help='勾選：機器設定值已納入回血/沖水總量。\n不勾選：機器未設定沖水，系統將自動把沖水總重計入水分滯留與誤差修正。'
 )
 
-# 立即執行計算，確保資料狀態正確
 st.session_state.data = update_calculations(st.session_state.data, tolerance_mode, tolerance_val, machine_uf_includes_rinsing)
 abnormal_count = len(st.session_state.data[st.session_state.data['狀態'].str.contains('異常', na=False)])
 
 # ==========================================
-# PDF 報告生成函式 (移除 Emoji 並使用正確字型)
+# PDF 報告生成函式 (已內含異常數據與分佈統計)
 # ==========================================
 def generate_pdf_report(df):
     buffer = io.BytesIO()
@@ -205,12 +202,45 @@ def generate_pdf_report(df):
     )
     
     story.append(Paragraph("<b>血液透析脫水監控與 IEC 60601-2-16 檢核報告</b>", title_style))
-    story.append(Spacer(1, 15))
+    story.append(Spacer(1, 10))
     
     summary_text = f"<b>產出時間：</b>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} &nbsp;&nbsp;|&nbsp;&nbsp; <b>總記錄場次：</b>{len(df)} 筆"
     story.append(Paragraph(summary_text, normal_style))
+    story.append(Spacer(1, 10))
+
+    # 加入「資料分布統計摘要」表格
+    over_count = len(df[df['狀態'].str.contains('多洗')])
+    under_count = len(df[df['狀態'].str.contains('少洗')])
+    normal_count = len(df[df['狀態'].str.contains('正常')])
+    
+    total = len(df) if len(df) > 0 else 1
+    over_pct = (over_count / total) * 100
+    under_pct = (under_count / total) * 100
+    normal_pct = (normal_count / total) * 100
+
+    dist_data = [
+        ['分佈狀態', '場次統計', '佔比'],
+        ['🟢 正常範圍', f'{normal_count} 筆', f'{normal_pct:.1f}%'],
+        ['🔴 多洗 (偏高)', f'{over_count} 筆', f'{over_pct:.1f}%'],
+        ['🔵 少洗 (偏低)', f'{under_count} 筆', f'{under_pct:.1f}%']
+    ]
+    dist_table = Table(dist_data, colWidths=[150, 150, 150])
+    dist_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F1F5F9')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1A202C')),
+        ('FONTNAME', (0, 0), (-1, -1), font_name),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+    ]))
+    story.append(dist_table)
     story.append(Spacer(1, 15))
     
+    # 完整記錄明細表格
+    story.append(Paragraph("<b>詳細歷史紀錄與檢核清單</b>", normal_style))
+    story.append(Spacer(1, 5))
+
     table_data = [['日期', '週期', '班別', '乾體重', '洗前', '洗後', '機器UF', '誤差值', '狀態']]
     for _, row in df.iterrows():
         clean_status = str(row['狀態']).replace('🔴', '').replace('🔵', '').replace('🟢', '').strip()
@@ -258,11 +288,10 @@ def generate_pdf_report(df):
     return buffer.getvalue()
 
 # ==========================================
-# 精準控制的驗證資料生成器函式
+# 驗證資料生成器
 # ==========================================
 def generate_verified_test_data(total_count, over_count, under_count):
     normal_count = max(0, total_count - over_count - under_count)
-    
     types = ['over'] * over_count + ['under'] * under_count + ['normal'] * normal_count
     random.shuffle(types)
     
@@ -322,23 +351,21 @@ def generate_verified_test_data(total_count, over_count, under_count):
     return df_res
 
 # ==========================================
-# 💾 長期資料與 PDF / JSON 報表管理
+# 側邊欄：長期資料與報表管理
 # ==========================================
 st.sidebar.markdown('---')
 st.sidebar.header('💾 長期資料與報表管理')
 
-# PDF 下載按鈕
 if not st.session_state.data.empty:
     pdf_bytes = generate_pdf_report(st.session_state.data)
     st.sidebar.download_button(
-        label='📄 下載正式 PDF 檢核報告',
+        label='📄 下載正式 PDF 檢核報告 (含分佈統計)',
         data=pdf_bytes,
         file_name=f'dialysis_uf_report_{datetime.now().strftime("%Y%m%d")}.pdf',
         mime='application/pdf',
         use_container_width=True
     )
 
-# 匯出 JSON 按鈕
 if not st.session_state.data.empty:
     json_data = st.session_state.data.to_json(orient='records', force_ascii=False)
     st.sidebar.download_button(
@@ -349,7 +376,6 @@ if not st.session_state.data.empty:
         use_container_width=True
     )
 
-# 匯入 JSON 檔案上傳
 uploaded_json = st.sidebar.file_uploader('📤 匯入紀錄 (JSON)', type=['json'])
 if uploaded_json is not None:
     try:
@@ -364,9 +390,6 @@ if uploaded_json is not None:
     except Exception as e:
         st.sidebar.error(f'讀取 JSON 發生錯誤：{e}')
 
-# ==========================================
-# 🧪 自我驗證資料生成器控制項
-# ==========================================
 st.sidebar.markdown('---')
 enable_validation_mode = st.sidebar.checkbox('🧪 啟用自我驗證資料產生器', value=False)
 
@@ -382,7 +405,7 @@ if enable_validation_mode:
         st.rerun()
 
 # ==========================================
-# 0. 主標題與右上角動態警示標籤
+# 主標題與警示
 # ==========================================
 col_title, col_badge = st.columns([4, 1]) 
 with col_title:
@@ -411,7 +434,7 @@ with col_badge:
 st.markdown('---')
 
 # ==========================================
-# 1. 定義彈出式視窗 (Dialog) - 完整表單新增
+# 彈出式新增表單
 # ==========================================
 @st.dialog("📝 新增洗腎紀錄 (表單模式)")
 def add_record_dialog():
@@ -428,7 +451,6 @@ def add_record_dialog():
         dry_wt = st.number_input('乾體重 (kg)', min_value=30.0, max_value=150.0, value=60.0, step=1.0, format="%.2f")
 
     st.write("") 
-    
     st.markdown("##### ⚖️ 透析與體重數據")
     col3, col4 = st.columns(2)
     with col3:
@@ -466,14 +488,12 @@ def add_record_dialog():
 
 st.sidebar.markdown('---')
 st.sidebar.header('📝 資料登錄')
-
 if st.sidebar.button('➕ 點此開啟表單新增', use_container_width=True):
     add_record_dialog()
 
 if st.session_state.pop('show_success_toast', False):
     st.toast('紀錄已成功新增！', icon='✅')
 
-# TFDA 醫材規範與 IEC 標準說明與連結
 st.sidebar.markdown('---')
 with st.sidebar.expander('📖 TFDA 醫材規範與 IEC 標準說明', expanded=False):
     st.markdown("""
@@ -485,9 +505,6 @@ with st.sidebar.expander('📖 TFDA 醫材規範與 IEC 標準說明', expanded=
       可參閱 [IEC 60601-2-16 標準資訊](https://webstore.iec.ch/publication/2565) 了解詳細規範。
     """)
 
-# ==========================================
-# 欄位更名與順序對應對照表
-# ==========================================
 RENAME_MAP = {
     '機器UF值': '💧 UF | 機器UF值',
     '預期脫水': '💧 UF | 預期脫水',
@@ -497,7 +514,7 @@ RENAME_MAP = {
 REVERSE_MAP = {v: k for k, v in RENAME_MAP.items()}
 
 # ==========================================
-# 3. 主畫面數據分析面板
+# 主畫面數據分析面板
 # ==========================================
 st.subheader('📊 數據分析檢視面板')
 
@@ -632,9 +649,6 @@ else:
         )
         st.plotly_chart(fig_pie, use_container_width=True)
 
-# ==========================================
-# 4. 欄位定義與規範說明 (頁腳 Footer)
-# ==========================================
 st.markdown('---')
 st.markdown('### 📖 欄位定義與系統規範說明')
 
