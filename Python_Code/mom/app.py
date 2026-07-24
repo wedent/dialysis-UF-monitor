@@ -41,11 +41,17 @@ div.stButton > button[kind="primary"]:hover {
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 繁體中文字型載入函式 (正確支援 Windows .ttc 集合字型)
+# 繁體中文字型載入函式 (支援雲端動態路徑與 Windows 備用)
 # ==========================================
 @st.cache_resource
 def register_pdf_font():
+    # 動態取得 app.py 所在的資料夾絕對路徑
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # 將資料夾路徑與字型檔名結合，組裝成正確的完整路徑
+    cloud_font_path = os.path.join(current_dir, 'NotoSansTC-Regular.ttf')
+
     font_configs = [
+        (cloud_font_path, None),            # [新增] 雲端專案資料夾內的思源黑體 (最優先讀取)
         ("C:/Windows/Fonts/msjh.ttc", 0),   # 微軟正黑體 (Subfont Index 0)
         ("C:/Windows/Fonts/msjh.ttf", None),
         ("C:/Windows/Fonts/simsun.ttc", 0), # 新細明體
