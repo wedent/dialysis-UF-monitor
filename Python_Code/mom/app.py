@@ -5,11 +5,13 @@ import random
 import pandas as pd
 import plotly.express as px
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.piecharts import Pie
 import streamlit as st
 
 st.set_page_config(
@@ -41,7 +43,7 @@ div.stButton > button[kind="primary"]:hover {
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 繁體中文字型載入函式 (支援雲端與本機備用)
+# 繁體中文字型載入函式
 # ==========================================
 @st.cache_resource
 def register_pdf_font():
@@ -49,10 +51,10 @@ def register_pdf_font():
     cloud_font_path = os.path.join(current_dir, 'NotoSansTC-Regular.ttf')
 
     font_configs = [
-        (cloud_font_path, None),            # 專案資料夾內的思源黑體
-        ("C:/Windows/Fonts/msjh.ttc", 0),   # 微軟正黑體
+        (cloud_font_path, None),            
+        ("C:/Windows/Fonts/msjh.ttc", 0),   
         ("C:/Windows/Fonts/msjh.ttf", None),
-        ("C:/Windows/Fonts/simsun.ttc", 0), # 新細明體
+        ("C:/Windows/Fonts/simsun.ttc", 0), 
         ("C:/Windows/Fonts/arial.ttf", None)
     ]
     for font_path, sub_idx in font_configs:
@@ -76,9 +78,15 @@ def update_calculations(df, tol_mode, tol_val, includes_rinsing):
     if df.empty:
         return df
     
-    numeric_cols = ['乾體重', '洗前體重', '洗後體重', '進食重量', '機器UF值', '沖水總重']
+    numeric_cols = ['乾體重', '洗前體重', '洗後體重', '進食重量', '機器UF值', '沖水總重', '輪椅重量']
     for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).round(2)
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).round(2)
+        else:
+            df[col] = 0.0
+
+    if '含輪椅' not in df.columns:
+        df['含輪椅'] = False
 
     weekday_map = {0: '週一', 1: '週二', 2: '週三', 3: '週四', 4: '週五', 5: '週六', 6: '週日'}
     df['日期_dt'] = pd.to_datetime(df['日期'], errors='coerce')
@@ -87,7 +95,13 @@ def update_calculations(df, tol_mode, tol_val, includes_rinsing):
     df['週期'] = df['週期'].astype(str)
 
     df['預期脫水'] = (df['洗前體重'] - df['乾體重']).round(2)
-    df['實際脫水'] = (df['洗前體重'] - df['洗後體重'] + df['進食重量']).round(2)
+    
+    effective_post_wt = df.apply(
+        lambda row: row['洗後體重'] - row['輪椅重量'] if row.get('含輪椅', False) else row['洗後體重'],
+        axis=1
+    )
+    
+    df['實際脫水'] = (df['洗前體重'] - (effective_post_wt - df['進食重量'])).round(2)
 
     if not includes_rinsing:
         df['誤差值'] = (df['實際脫水'] - (df['預期脫水'] + df['沖水總重'])).round(2)
@@ -126,10 +140,12 @@ if 'data' not in st.session_state:
     st.session_state.data = pd.DataFrame(
         columns=[
             '日期', '週期', '班別', '乾體重', '洗前體重', '洗後體重', '進食重量',
-            '機器UF值', '沖水總重', '預期脫水', '實際脫水', '誤差值', '狀態'
+            '機器UF值', '沖水總重', '含輪椅', '輪椅重量', '預期脫水', '實際脫水', '誤差值', '狀態'
         ]
     )
     st.session_state.data['週期'] = st.session_state.data['週期'].astype(str)
+    st.session_state.data['含輪椅'] = False
+    st.session_state.data['輪椅重量'] = 0.0
 
 # ==========================================
 # 側邊欄設定
@@ -168,13 +184,13 @@ st.session_state.data = update_calculations(st.session_state.data, tolerance_mod
 abnormal_count = len(st.session_state.data[st.session_state.data['狀態'].str.contains('異常', na=False)])
 
 # ==========================================
-# PDF 報告生成函式 (已內含異常數據與分佈統計)
+# PDF 報告生成函式
 # ==========================================
 def generate_pdf_report(df):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer, 
-        pagesize=A4,
+        pagesize=landscape(A4), 
         rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30
     )
     story = []
@@ -186,8 +202,8 @@ def generate_pdf_report(df):
         'ReportTitle',
         parent=styles['Heading1'],
         fontName=font_name,
-        fontSize=16,
-        leading=20,
+        fontSize=18,
+        leading=22,
         alignment=1,
         textColor=colors.HexColor('#1A202C')
     )
@@ -208,7 +224,6 @@ def generate_pdf_report(df):
     story.append(Paragraph(summary_text, normal_style))
     story.append(Spacer(1, 10))
 
-    # 加入「資料分布統計摘要」表格
     over_count = len(df[df['狀態'].str.contains('多洗')])
     under_count = len(df[df['狀態'].str.contains('少洗')])
     normal_count = len(df[df['狀態'].str.contains('正常')])
@@ -224,7 +239,7 @@ def generate_pdf_report(df):
         ['🔴 多洗 (偏高)', f'{over_count} 筆', f'{over_pct:.1f}%'],
         ['🔵 少洗 (偏低)', f'{under_count} 筆', f'{under_pct:.1f}%']
     ]
-    dist_table = Table(dist_data, colWidths=[150, 150, 150])
+    dist_table = Table(dist_data, colWidths=[130, 100, 100])
     dist_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F1F5F9')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1A202C')),
@@ -234,29 +249,58 @@ def generate_pdf_report(df):
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
     ]))
-    story.append(dist_table)
+
+    d = Drawing(120, 120)
+    pc = Pie()
+    pc.x = 10
+    pc.y = 10
+    pc.width = 100
+    pc.height = 100
+    pc.data = [
+        normal_count if normal_count > 0 else 0.001,
+        over_count if over_count > 0 else 0.001,
+        under_count if under_count > 0 else 0.001
+    ]
+    pc.slices[0].fillColor = colors.HexColor('#059669') 
+    pc.slices[1].fillColor = colors.HexColor('#DC2626') 
+    pc.slices[2].fillColor = colors.HexColor('#7C3AED') 
+    pc.labels = ['', '', ''] 
+    d.add(pc)
+
+    summary_layout = Table([[dist_table, d]], colWidths=[380, 140])
+    summary_layout.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('ALIGN', (1,0), (1,0), 'CENTER')
+    ]))
+    
+    story.append(summary_layout)
     story.append(Spacer(1, 15))
     
-    # 完整記錄明細表格
-    story.append(Paragraph("<b>詳細歷史紀錄與檢核清單</b>", normal_style))
+    story.append(Paragraph("<b>詳細歷史紀錄與檢核清單 (包含完整運算參數)</b>", normal_style))
     story.append(Spacer(1, 5))
 
-    table_data = [['日期', '週期', '班別', '乾體重', '洗前', '洗後', '機器UF', '誤差值', '狀態']]
+    table_data = [['日期', '班別', '乾體重', '洗前', '洗後(秤)', '輪椅重', '進食', '預期脫水', '機器UF', '沖水', '實際脫水', '誤差值', '狀態']]
     for _, row in df.iterrows():
         clean_status = str(row['狀態']).replace('🔴', '').replace('🔵', '').replace('🟢', '').strip()
+        wheelchair_str = f"{row.get('輪椅重量', 0.0)}" if row.get('含輪椅', False) else "0.0"
+        
         table_data.append([
             str(row['日期']),
-            str(row['週期']),
             str(row['班別']),
             str(row['乾體重']),
             str(row['洗前體重']),
             str(row['洗後體重']),
+            wheelchair_str,
+            str(row.get('進食重量', 0.0)),
+            str(row.get('預期脫水', 0.0)),
             str(row['機器UF值']),
+            str(row.get('沖水總重', 0.0)),
+            str(row.get('實際脫水', 0.0)),
             str(row['誤差值']),
             clean_status
         ])
         
-    t = Table(table_data, colWidths=[65, 45, 45, 45, 45, 45, 50, 50, 75])
+    t = Table(table_data, colWidths=[65, 35, 45, 45, 50, 45, 40, 55, 50, 40, 55, 45, 75])
     
     t_style = [
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#E2E8F0')),
@@ -272,14 +316,14 @@ def generate_pdf_report(df):
         row_idx = idx + 1 
         status = str(row['狀態'])
         if '多洗' in status:
-            t_style.append(('TEXTCOLOR', (8, row_idx), (8, row_idx), colors.HexColor('#DC2626')))
-            t_style.append(('BACKGROUND', (8, row_idx), (8, row_idx), colors.HexColor('#FEE2E2')))
+            t_style.append(('TEXTCOLOR', (12, row_idx), (12, row_idx), colors.HexColor('#DC2626')))
+            t_style.append(('BACKGROUND', (12, row_idx), (12, row_idx), colors.HexColor('#FEE2E2')))
         elif '少洗' in status:
-            t_style.append(('TEXTCOLOR', (8, row_idx), (8, row_idx), colors.HexColor('#7C3AED')))
-            t_style.append(('BACKGROUND', (8, row_idx), (8, row_idx), colors.HexColor('#EDE9FE')))
+            t_style.append(('TEXTCOLOR', (12, row_idx), (12, row_idx), colors.HexColor('#7C3AED')))
+            t_style.append(('BACKGROUND', (12, row_idx), (12, row_idx), colors.HexColor('#EDE9FE')))
         elif '正常' in status:
-            t_style.append(('TEXTCOLOR', (8, row_idx), (8, row_idx), colors.HexColor('#059669')))
-            t_style.append(('BACKGROUND', (8, row_idx), (8, row_idx), colors.HexColor('#D1FAE5')))
+            t_style.append(('TEXTCOLOR', (12, row_idx), (12, row_idx), colors.HexColor('#059669')))
+            t_style.append(('BACKGROUND', (12, row_idx), (12, row_idx), colors.HexColor('#D1FAE5')))
             
     t.setStyle(TableStyle(t_style))
     story.append(t)
@@ -329,7 +373,7 @@ def generate_verified_test_data(total_count, over_count, under_count):
         else:
             target_actual_uf = round(expected_uf + random.uniform(-0.02, 0.02), 2)
             
-        post_wt = round(pre_wt + food_wt - target_actual_uf, 2)
+        post_wt = round(pre_wt - food_wt - target_actual_uf, 2)
         
         data.append({
             '日期': current_date,
@@ -341,6 +385,8 @@ def generate_verified_test_data(total_count, over_count, under_count):
             '進食重量': food_wt,
             '機器UF值': machine_uf,
             '沖水總重': rinsing_wt,
+            '含輪椅': False,
+            '輪椅重量': 0.0,
             '預期脫水': 0.0,
             '實際脫水': 0.0,
             '誤差值': 0.0,
@@ -359,7 +405,7 @@ st.sidebar.header('💾 長期資料與報表管理')
 if not st.session_state.data.empty:
     pdf_bytes = generate_pdf_report(st.session_state.data)
     st.sidebar.download_button(
-        label='📄 下載正式 PDF 檢核報告 (含分佈統計)',
+        label='📄 下載正式 PDF 檢核報告 (含圓餅圖與明細)',
         data=pdf_bytes,
         file_name=f'dialysis_uf_report_{datetime.now().strftime("%Y%m%d")}.pdf',
         mime='application/pdf',
@@ -383,6 +429,10 @@ if uploaded_json is not None:
         required_cols = ['日期', '週期', '班別', '乾體重', '洗前體重', '洗後體重', '進食重量', '機器UF值', '沖水總重']
         if all(col in imported_df.columns for col in required_cols):
             st.session_state.data = imported_df
+            if '含輪椅' not in st.session_state.data.columns:
+                st.session_state.data['含輪椅'] = False
+            if '輪椅重量' not in st.session_state.data.columns:
+                st.session_state.data['輪椅重量'] = 0.0
             st.sidebar.success('JSON 歷史紀錄已成功載入！')
             st.rerun()
         else:
@@ -434,7 +484,7 @@ with col_badge:
 st.markdown('---')
 
 # ==========================================
-# 彈出式新增表單
+# 彈出式新增表單 (含輪椅重量設定)
 # ==========================================
 @st.dialog("📝 新增洗腎紀錄 (表單模式)")
 def add_record_dialog():
@@ -455,11 +505,18 @@ def add_record_dialog():
     col3, col4 = st.columns(2)
     with col3:
         pre_wt = st.number_input('洗前體重 (kg)', min_value=30.0, max_value=150.0, value=float(dry_wt + 1.0), step=0.1, format="%.2f")
-        post_wt = st.number_input('洗後體重 (kg)', min_value=30.0, max_value=150.0, value=float(dry_wt), step=0.1, format="%.2f")
-        food_wt = st.number_input('進食重量 (kg)', min_value=0.0, max_value=2.0, value=0.0, step=0.1, format="%.2f")
+        post_wt = st.number_input('洗後秤重讀數 (kg)', min_value=30.0, max_value=150.0, value=float(dry_wt), step=0.1, format="%.2f", help="若連輪椅一起量測，請填寫磅秤顯示的總重量")
+        food_wt = st.number_input('進食重量 (kg)', min_value=0.0, max_value=2.0, value=0.0, step=0.1, format="%.2f", help="透析中進食或補充水分之總重量")
     with col4:
         machine_uf = st.number_input('機器UF值 (L/kg)', min_value=0.0, max_value=10.0, value=5.0, step=0.1, format="%.2f")
         rinsing_wt = st.number_input('沖水/回血總重影響 (kg)', min_value=0.0, max_value=2.0, value=0.3, step=0.05, format="%.2f")
+
+    st.write("")
+    st.markdown("##### 🦽 輪椅重量校正 (選填)")
+    include_wheelchair = st.checkbox('洗後體重包含輪椅重量', value=False, help='勾選後，系統會自動從洗後秤重讀數中扣除輪椅重量以計算真實脫水')
+    wheelchair_wt = 0.0
+    if include_wheelchair:
+        wheelchair_wt = st.number_input('輪椅重量 (kg)', min_value=0.0, max_value=30.0, value=12.0, step=0.5, format="%.2f")
 
     st.write("") 
     st.info("💡 提示：儲存後，系統會自動依照日期與標準進行計算。")
@@ -475,6 +532,8 @@ def add_record_dialog():
             '進食重量': round(food_wt, 2),
             '機器UF值': round(machine_uf, 2),
             '沖水總重': round(rinsing_wt, 2),
+            '含輪椅': include_wheelchair,
+            '輪椅重量': round(wheelchair_wt, 2),
             '預期脫水': 0.0,
             '實際脫水': 0.0,
             '誤差值': 0.0,
@@ -509,9 +568,13 @@ RENAME_MAP = {
     '機器UF值': '💧 UF | 機器UF值',
     '預期脫水': '💧 UF | 預期脫水',
     '沖水總重': '💧 UF | 沖水總重',
-    '進食重量': '進食重量'
+    '進食重量': '進食重量',
+    '洗後體重': '洗後(秤)',
+    '含輪椅': '🦽 含輪椅',
+    '輪椅重量': '輪椅重(kg)'
 }
 REVERSE_MAP = {v: k for k, v in RENAME_MAP.items()}
+EDITABLE_INTERNAL_COLS = ['洗前體重', '洗後體重', '含輪椅', '輪椅重量', '進食重量', '機器UF值', '沖水總重']
 
 # ==========================================
 # 主畫面數據分析面板
@@ -530,7 +593,10 @@ else:
     )
 
     column_order_list = [
-        '日期', '週期', '班別', '乾體重', '洗前體重', '洗後體重', 
+        '日期', '週期', '班別', '乾體重', '洗前體重', 
+        RENAME_MAP['洗後體重'], 
+        RENAME_MAP['含輪椅'],
+        RENAME_MAP['輪椅重量'],
         RENAME_MAP['進食重量'],
         RENAME_MAP['機器UF值'], 
         RENAME_MAP['預期脫水'], 
@@ -545,23 +611,42 @@ else:
         display_df.insert(0, '項次', range(1, len(display_df) + 1))
         display_df['🗑️ 點選刪除'] = False
         
-        st.info("💡 **提示**：請直接在下方表格的最右側勾選要刪除的場次，然後點擊「確認刪除已勾選項目」。")
+        st.info("💡 **提示**：請直接在下方表格的最右側雙擊數值進行修改，修改後系統會「自動重新計算脫水狀態」！")
         
         edited_df = st.data_editor(
             display_df,
             use_container_width=True,
             hide_index=True,
-            disabled=[col for col in display_df.columns if col != '🗑️ 點選刪除'],
+            disabled=[col for col in display_df.columns if col not in ['洗前體重', RENAME_MAP['洗後體重'], RENAME_MAP['輪椅重量'], RENAME_MAP['進食重量'], RENAME_MAP['機器UF值'], RENAME_MAP['沖水總重'], '🗑️ 點選刪除', RENAME_MAP['含輪椅']]],
             key="main_data_editor"
         )
+        
+        # --- 自動連動計算邏輯 (全部視圖) ---
+        edited_internal = edited_df.rename(columns=REVERSE_MAP)
+        is_modified = False
+        for col in EDITABLE_INTERNAL_COLS:
+            if col == '含輪椅':
+                if not edited_internal[col].equals(df[col]):
+                    is_modified = True
+                    break
+            else:
+                if not pd.to_numeric(edited_internal[col], errors='coerce').round(2).equals(
+                       pd.to_numeric(df[col], errors='coerce').round(2)):
+                    is_modified = True
+                    break
+                    
+        if is_modified:
+            for col in EDITABLE_INTERNAL_COLS:
+                st.session_state.data[col] = edited_internal[col]
+            st.rerun()
+        # -------------------------------
         
         col_btn1, col_btn2 = st.columns([8, 2])
         with col_btn2:
             if st.button("確認刪除已勾選項目", type="primary", use_container_width=True):
                 if edited_df['🗑️ 點選刪除'].any():
                     keep_mask = ~edited_df['🗑️ 點選刪除']
-                    cleaned_df = edited_df[keep_mask]
-                    st.session_state.data = cleaned_df.drop(columns=['項次', '🗑️ 點選刪除'], errors='ignore').rename(columns=REVERSE_MAP)
+                    st.session_state.data = st.session_state.data[keep_mask].reset_index(drop=True)
                     st.session_state.data['週期'] = st.session_state.data['週期'].astype(str)
                     st.success("已成功刪除所選紀錄！")
                     st.rerun()
@@ -590,13 +675,39 @@ else:
             disp_abn_df.insert(0, '項次', range(1, len(disp_abn_df) + 1))
             disp_abn_df['🗑️ 點選刪除'] = False
             
+            st.info("💡 **提示**：直接在表格雙擊修改，修改後若數值落回正常範圍，該筆資料將會自動從異常清單中消失！")
+            
             edited_abn_df = st.data_editor(
                 disp_abn_df,
                 use_container_width=True,
                 hide_index=True,
-                disabled=[col for col in disp_abn_df.columns if col != '🗑️ 點選刪除'],
+                disabled=[col for col in disp_abn_df.columns if col not in ['洗前體重', RENAME_MAP['洗後體重'], RENAME_MAP['輪椅重量'], RENAME_MAP['進食重量'], RENAME_MAP['機器UF值'], RENAME_MAP['沖水總重'], '🗑️ 點選刪除', RENAME_MAP['含輪椅']]],
                 key="abnormal_data_editor"
             )
+            
+            # --- 自動連動計算邏輯 (異常視圖) ---
+            edited_internal_abn = edited_abn_df.rename(columns=REVERSE_MAP)
+            abn_original_reset = abnormal_df.reset_index(drop=True)
+            
+            is_modified_abn = False
+            for col in EDITABLE_INTERNAL_COLS:
+                if col == '含輪椅':
+                    if not edited_internal_abn[col].equals(abn_original_reset[col]):
+                        is_modified_abn = True
+                        break
+                else:
+                    if not pd.to_numeric(edited_internal_abn[col], errors='coerce').round(2).equals(
+                           pd.to_numeric(abn_original_reset[col], errors='coerce').round(2)):
+                        is_modified_abn = True
+                        break
+                        
+            if is_modified_abn:
+                original_indices = abnormal_df.index
+                for i, orig_idx in enumerate(original_indices):
+                    for col in EDITABLE_INTERNAL_COLS:
+                        st.session_state.data.at[orig_idx, col] = edited_internal_abn.at[i, col]
+                st.rerun()
+            # -------------------------------
             
             col_abn_btn1, col_abn_btn2 = st.columns([8, 2])
             with col_abn_btn2:
@@ -658,7 +769,8 @@ with col_def1:
     ##### 📌 基礎體重數據
     * **乾體重 (Dry Weight)**：醫生評估設定目標體重。
     * **洗前體重**：本次透析療程前測量的實際體重。
-    * **洗後體重**：本次透析療程結束後測量的實際體重。
+    * **洗後(秤)**：本次透析療程結束後磅秤上的實際讀數（若連輪椅測量會包含輪椅重）。
+    * **輪椅重 / 含輪椅**：當洗後體重包含輪椅時，系統自動扣除以計算真實淨體重。
     * **進食重量**：療程中病患額外攝取之食物或水分重量。
     """)
 with col_def2:
@@ -667,6 +779,6 @@ with col_def2:
     * **機器UF值 (Total UF)**：透析機面板上設定的總脫水量。
     * **沖水總重**：療程中額外進入病患體內的總液體重量 (如生理食鹽水沖洗、回血等)。
     * **預期脫水**：由體重反推的理論需求脫水量 (`洗前體重` - `乾體重`)。
-    * **實際脫水**：病患實際被抽走的水量 (`洗前體重` - `洗後體重` + `進食重量`)。
+    * **實際脫水**：病患實際被抽走的水量 (`洗前體重` - (`洗後體重` - `進食重量`))。
     * **誤差值**：實際脫水與預期脫水量的落差。當場次超出容許誤差範圍時，系統將標示為**異常數據**。
     """)
