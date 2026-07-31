@@ -72,9 +72,9 @@ def register_pdf_font():
 has_cjk_font = register_pdf_font()
 
 # ==========================================
-# 核心計算引擎
+# 核心計算引擎 (加入透析時間計算 IEC 標準)
 # ==========================================
-def update_calculations(df, tol_mode, tol_val, includes_rinsing):
+def update_calculations(df, tol_mode, tol_val, includes_rinsing, iec_time_hr=4.0, iec_base_err=50):
     if df.empty:
         return df
     
@@ -103,10 +103,11 @@ def update_calculations(df, tol_mode, tol_val, includes_rinsing):
     
     df['實際脫水'] = (df['洗前體重'] - (effective_post_wt - df['進食重量'])).round(2)
 
-    if not includes_rinsing:
-        df['誤差值'] = (df['實際脫水'] - (df['預期脫水'] + df['沖水總重'])).round(2)
-    else:
-        df['誤差值'] = (df['實際脫水'] - df['預期脫水']).round(2)
+    # 機器淨脫水量 (Baseline) = 機器設定的總UF - 沖水總重
+    machine_net_uf = (df['機器UF值'] - df['沖水總重']).round(2)
+    
+    # 誤差值 = 實際脫水 - 機器的淨脫水目標
+    df['誤差值'] = (df['實際脫水'] - machine_net_uf).round(2)
 
     statuses = []
     for _, row in df.iterrows():
@@ -117,11 +118,13 @@ def update_calculations(df, tol_mode, tol_val, includes_rinsing):
         if tol_mode == '嚴格模式 (零容忍：只要有誤差即異常)':
             if abs(error_val) > 0.0:
                 is_abnormal = True
-        elif tol_mode == 'IEC 60601-2-16 標準 (Max: 50g 或 1%)':
-            threshold_kg = max(0.05, abs(target_uf) * 0.01)
+        elif tol_mode == 'IEC 60601-2-16 標準 (時間基準 或 1%)':
+            # 計算絕對容許誤差 (每小時容許值 * 透析時間) / 1000 換算成 kg
+            abs_limit_kg = (iec_base_err * iec_time_hr) / 1000.0
+            threshold_kg = max(abs_limit_kg, abs(target_uf) * 0.01)
             if abs(error_val) > threshold_kg: is_abnormal = True
-        elif tol_mode == '固定重量 (g)':
-            if abs(error_val * 1000) > tol_val: is_abnormal = True
+        elif tol_mode == '固定重量 (kg)':
+            if abs(error_val) > tol_val: is_abnormal = True
         else: 
             threshold_kg = abs(target_uf) * (tol_val / 100)
             if abs(error_val) > threshold_kg: is_abnormal = True
@@ -156,16 +159,23 @@ tolerance_mode = st.sidebar.radio(
     '容許誤差判定模式', 
     [
         '嚴格模式 (零容忍：只要有誤差即異常)',
-        'IEC 60601-2-16 標準 (Max: 50g 或 1%)', 
-        '固定重量 (g)', 
+        'IEC 60601-2-16 標準 (時間基準 或 1%)', 
+        '固定重量 (kg)', 
         '預期脫水量的百分比 (%)'
     ]
 )
 
 tolerance_val = None
-if tolerance_mode == '固定重量 (g)':
+iec_time_hr = 4.0
+iec_base_err = 50
+
+if tolerance_mode == 'IEC 60601-2-16 標準 (時間基準 或 1%)':
+    st.sidebar.markdown('**➤ IEC 參數設定**')
+    iec_time_hr = st.sidebar.number_input('預設透析時間 (小時)', min_value=1.0, max_value=8.0, value=4.0, step=0.5, help="透析時間會直接影響總容許誤差值")
+    iec_base_err = st.sidebar.number_input('每小時容許誤差 (g/hr)', min_value=10, max_value=100, value=50, step=10, help="例如：洗 4 小時 × 50g/hr = 200g 的絕對容許誤差")
+elif tolerance_mode == '固定重量 (kg)':
     tolerance_val = st.sidebar.slider(
-        '自訂容許誤差值 (g)', min_value=50, max_value=500, value=150, step=50
+        '自訂容許誤差值 (kg)', min_value=0.1, max_value=2.0, value=0.2, step=0.1, format="%.1f"
     )
 elif tolerance_mode == '預期脫水量的百分比 (%)':
     tolerance_val = st.sidebar.slider(
@@ -180,7 +190,7 @@ machine_uf_includes_rinsing = st.sidebar.checkbox(
     help='勾選：機器設定值已納入回血/沖水總量。\n不勾選：機器未設定沖水，系統將自動把沖水總重計入水分滯留與誤差修正。'
 )
 
-st.session_state.data = update_calculations(st.session_state.data, tolerance_mode, tolerance_val, machine_uf_includes_rinsing)
+st.session_state.data = update_calculations(st.session_state.data, tolerance_mode, tolerance_val, machine_uf_includes_rinsing, iec_time_hr, iec_base_err)
 abnormal_count = len(st.session_state.data[st.session_state.data['狀態'].str.contains('異常', na=False)])
 
 # ==========================================
@@ -332,7 +342,7 @@ def generate_pdf_report(df):
     return buffer.getvalue()
 
 # ==========================================
-# 驗證資料生成器
+# 驗證資料生成器 (對齊真實機器誤差Baseline)
 # ==========================================
 def generate_verified_test_data(total_count, over_count, under_count):
     normal_count = max(0, total_count - over_count - under_count)
@@ -359,21 +369,30 @@ def generate_verified_test_data(total_count, over_count, under_count):
         cycle = weekday_map[current_date_dt.weekday()]
         shift = random.choice(['早班', '中班', '晚班'])
         
-        dry_wt = float(random.randint(55, 70))
+        dry_wt = float(random.randint(65, 80)) 
         pre_wt = round(dry_wt + random.uniform(1.5, 3.5), 2)
         expected_uf = round(pre_wt - dry_wt, 2)
-        machine_uf = expected_uf
+        
         rinsing_wt = random.choice([0.3, 0.6])
         food_wt = random.choice([0.0, 0.0, 0.2, 0.3, 0.5])
         
+        # 機器UF設定 = 預期脫水量 + 沖水 (讓淨脫水達到預期)
+        machine_uf = round(expected_uf + rinsing_wt, 2)
+        # 機器的淨目標 (Baseline)
+        machine_net_uf = round(machine_uf - rinsing_wt, 2)
+        
+        # 依據狀態產生機器誤差
         if t == 'over':
-            target_actual_uf = round(expected_uf + random.uniform(0.08, 0.25), 2)
+            error_val = round(random.uniform(0.08, 0.25), 2)
         elif t == 'under':
-            target_actual_uf = round(expected_uf - random.uniform(0.08, 0.25), 2)
+            error_val = round(-random.uniform(0.08, 0.25), 2)
         else:
-            target_actual_uf = round(expected_uf + random.uniform(-0.02, 0.02), 2)
+            error_val = round(random.uniform(-0.02, 0.02), 2)
             
-        post_wt = round(pre_wt - food_wt - target_actual_uf, 2)
+        actual_dehydration = round(machine_net_uf + error_val, 2)
+        
+        # 反推磅秤應該出現的洗後體重
+        post_wt = round(pre_wt - actual_dehydration + food_wt, 2)
         
         data.append({
             '日期': current_date,
@@ -498,7 +517,7 @@ def add_record_dialog():
         calculated_cycle = weekday_map[date_input.weekday()]
         st.text_input('週期 (系統自動判定)', value=calculated_cycle, disabled=True)
         
-        dry_wt = st.number_input('乾體重 (kg)', min_value=30.0, max_value=150.0, value=60.0, step=1.0, format="%.2f")
+        dry_wt = st.number_input('乾體重 (kg)', min_value=30.0, max_value=150.0, value=73.0, step=0.1, format="%.2f")
 
     st.write("") 
     st.markdown("##### ⚖️ 透析與體重數據")
@@ -516,7 +535,7 @@ def add_record_dialog():
     include_wheelchair = st.checkbox('洗後體重包含輪椅重量', value=False, help='勾選後，系統會自動從洗後秤重讀數中扣除輪椅重量以計算真實脫水')
     wheelchair_wt = 0.0
     if include_wheelchair:
-        wheelchair_wt = st.number_input('輪椅重量 (kg)', min_value=0.0, max_value=30.0, value=12.0, step=0.5, format="%.2f")
+        wheelchair_wt = st.number_input('輪椅重量 (kg)', min_value=0.0, max_value=30.0, value=11.9, step=0.1, format="%.2f")
 
     st.write("") 
     st.info("💡 提示：儲存後，系統會自動依照日期與標準進行計算。")
@@ -559,7 +578,7 @@ with st.sidebar.expander('📖 TFDA 醫材規範與 IEC 標準說明', expanded=
     **衛福部食藥署 (TFDA)** 在審查血液透析機時，要求設備符合 **IEC 60601-2-16** 標準，以確保病患安全。
     
     * **精準度規範 (UF Control)**：
-      業界與標準最常採用的脫水誤差容許門檻為 **±50 cc 或 機器設定UF值的 ±1%**。
+      業界與標準最常採用的脫水誤差容許門檻為 **每小時 ±50 cc × 透析時間 或 機器設定UF值的 ±1% (兩者取其大)**。
     * **相關標準參考**：
       可參閱 [IEC 60601-2-16 標準資訊](https://webstore.iec.ch/publication/2565) 了解詳細規範。
     """)
@@ -778,7 +797,8 @@ with col_def2:
     ##### 📌 UF 脫水與運算邏輯
     * **機器UF值 (Total UF)**：透析機面板上設定的總脫水量。
     * **沖水總重**：療程中額外進入病患體內的總液體重量 (如生理食鹽水沖洗、回血等)。
-    * **預期脫水**：由體重反推的理論需求脫水量 (`洗前體重` - `乾體重`)。
-    * **實際脫水**：病患實際被抽走的水量 (`洗前體重` - (`洗後體重` - `進食重量`))。
-    * **誤差值**：實際脫水與預期脫水量的落差。當場次超出容許誤差範圍時，系統將標示為**異常數據**。
+    * **預期脫水**：由體重反推的理論需求脫水量 (`洗前體重` - `乾體重`)。代表病人應該脫多少水。
+    * **實際脫水**：病患實際被抽走的水量 (`洗前體重` - (`洗後秤重讀數` - `輪椅重量` - `進食重量`))。
+    * **機器淨脫水**：機器實際對病患造成的淨脫水量 (`機器UF值` - `沖水總重`)。
+    * **誤差值**：用來驗證機器準確度 (`實際脫水` - `機器淨脫水`)。當落差超出容許範圍時，標示為異常。
     """)
