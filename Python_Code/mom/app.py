@@ -72,7 +72,7 @@ def register_pdf_font():
 has_cjk_font = register_pdf_font()
 
 # ==========================================
-# 核心計算引擎 (加入透析時間計算 IEC 標準)
+# 核心計算引擎
 # ==========================================
 def update_calculations(df, tol_mode, tol_val, includes_rinsing, iec_time_hr=4.0, iec_base_err=50):
     if df.empty:
@@ -572,6 +572,9 @@ if st.sidebar.button('➕ 點此開啟表單新增', use_container_width=True):
 if st.session_state.pop('show_success_toast', False):
     st.toast('紀錄已成功新增！', icon='✅')
 
+# ==========================================
+# TFDA 與 IEC 規範說明區塊 (已新增資料庫查詢連結)
+# ==========================================
 st.sidebar.markdown('---')
 with st.sidebar.expander('📖 TFDA 醫材規範與 IEC 標準說明', expanded=False):
     st.markdown("""
@@ -580,7 +583,8 @@ with st.sidebar.expander('📖 TFDA 醫材規範與 IEC 標準說明', expanded=
     * **精準度規範 (UF Control)**：
       業界與標準最常採用的脫水誤差容許門檻為 **每小時 ±50 cc × 透析時間 或 機器設定UF值的 ±1% (兩者取其大)**。
     * **相關標準參考**：
-      可參閱 [IEC 60601-2-16 標準資訊](https://webstore.iec.ch/publication/2565) 了解詳細規範。
+      1. 國際標準：[IEC 60601-2-16 標準資訊](https://webstore.iec.ch/publication/2565)
+      2. TFDA 仿單查詢：[醫療器材許可證資料庫查詢系統](https://lmspiq.fda.gov.tw/web/) *(可於此查詢各廠牌透析機之原廠技術規格與精準度宣告)*
     """)
 
 RENAME_MAP = {
@@ -690,7 +694,8 @@ else:
         if abnormal_df.empty:
             st.success('目前的紀錄中沒有發現異常數據的場次。')
         else:
-            disp_abn_df = abnormal_df.rename(columns=RENAME_MAP)[column_order_list].copy()
+            # 這裡加上了最重要的 .reset_index(drop=True)，修復 IndexError/KeyError！
+            disp_abn_df = abnormal_df.rename(columns=RENAME_MAP)[column_order_list].copy().reset_index(drop=True)
             disp_abn_df.insert(0, '項次', range(1, len(disp_abn_df) + 1))
             disp_abn_df['🗑️ 點選刪除'] = False
             
