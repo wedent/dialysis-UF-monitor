@@ -119,7 +119,6 @@ def update_calculations(df, tol_mode, tol_val, includes_rinsing, iec_time_hr=4.0
             if abs(error_val) > 0.0:
                 is_abnormal = True
         elif tol_mode == 'IEC 60601-2-16 標準 (時間基準 或 1%)':
-            # 計算絕對容許誤差 (每小時容許值 * 透析時間) / 1000 換算成 kg
             abs_limit_kg = (iec_base_err * iec_time_hr) / 1000.0
             threshold_kg = max(abs_limit_kg, abs(target_uf) * 0.01)
             if abs(error_val) > threshold_kg: is_abnormal = True
@@ -138,7 +137,7 @@ def update_calculations(df, tol_mode, tol_val, includes_rinsing, iec_time_hr=4.0
     df['狀態'] = statuses
     return df
 
-# 初始化 DataFrame
+# 初始化 Session State 變數
 if 'data' not in st.session_state:
     st.session_state.data = pd.DataFrame(
         columns=[
@@ -149,6 +148,9 @@ if 'data' not in st.session_state:
     st.session_state.data['週期'] = st.session_state.data['週期'].astype(str)
     st.session_state.data['含輪椅'] = False
     st.session_state.data['輪椅重量'] = 0.0
+
+if 'active_view_tab' not in st.session_state:
+    st.session_state.active_view_tab = '📋 全部紀錄'
 
 # ==========================================
 # 側邊欄設定
@@ -342,7 +344,7 @@ def generate_pdf_report(df):
     return buffer.getvalue()
 
 # ==========================================
-# 驗證資料生成器 (對齊真實機器誤差Baseline)
+# 驗證資料生成器
 # ==========================================
 def generate_verified_test_data(total_count, over_count, under_count):
     normal_count = max(0, total_count - over_count - under_count)
@@ -376,12 +378,9 @@ def generate_verified_test_data(total_count, over_count, under_count):
         rinsing_wt = random.choice([0.3, 0.6])
         food_wt = random.choice([0.0, 0.0, 0.2, 0.3, 0.5])
         
-        # 機器UF設定 = 預期脫水量 + 沖水 (讓淨脫水達到預期)
         machine_uf = round(expected_uf + rinsing_wt, 2)
-        # 機器的淨目標 (Baseline)
         machine_net_uf = round(machine_uf - rinsing_wt, 2)
         
-        # 依據狀態產生機器誤差
         if t == 'over':
             error_val = round(random.uniform(0.08, 0.25), 2)
         elif t == 'under':
@@ -390,8 +389,6 @@ def generate_verified_test_data(total_count, over_count, under_count):
             error_val = round(random.uniform(-0.02, 0.02), 2)
             
         actual_dehydration = round(machine_net_uf + error_val, 2)
-        
-        # 反推磅秤應該出現的洗後體重
         post_wt = round(pre_wt - actual_dehydration + food_wt, 2)
         
         data.append({
@@ -441,23 +438,27 @@ if not st.session_state.data.empty:
         use_container_width=True
     )
 
-uploaded_json = st.sidebar.file_uploader('📤 匯入紀錄 (JSON)', type=['json'])
+uploaded_json = st.sidebar.file_uploader('📤 匯入紀錄 (JSON)', type=['json'], key='json_file_uploader')
 if uploaded_json is not None:
-    try:
-        imported_df = pd.read_json(uploaded_json)
-        required_cols = ['日期', '週期', '班別', '乾體重', '洗前體重', '洗後體重', '進食重量', '機器UF值', '沖水總重']
-        if all(col in imported_df.columns for col in required_cols):
-            st.session_state.data = imported_df
-            if '含輪椅' not in st.session_state.data.columns:
-                st.session_state.data['含輪椅'] = False
-            if '輪椅重量' not in st.session_state.data.columns:
-                st.session_state.data['輪椅重量'] = 0.0
-            st.sidebar.success('JSON 歷史紀錄已成功載入！')
-            st.rerun()
-        else:
-            st.sidebar.error('JSON 檔案格式或欄位不符，請確認來源。')
-    except Exception as e:
-        st.sidebar.error(f'讀取 JSON 發生錯誤：{e}')
+    # 避免重複讀取造成無限重載
+    if st.session_state.get('last_uploaded_json_name') != uploaded_json.name:
+        try:
+            imported_df = pd.read_json(uploaded_json)
+            required_cols = ['日期', '週期', '班別', '乾體重', '洗前體重', '洗後體重', '進食重量', '機器UF值', '沖水總重']
+            if all(col in imported_df.columns for col in required_cols):
+                st.session_state.data = imported_df
+                if '含輪椅' not in st.session_state.data.columns:
+                    st.session_state.data['含輪椅'] = False
+                if '輪椅重量' not in st.session_state.data.columns:
+                    st.session_state.data['輪椅重量'] = 0.0
+                st.session_state.last_uploaded_json_name = uploaded_json.name
+                st.session_state.active_view_tab = '📋 全部紀錄' # 匯入成功後，自動切換到全部紀錄！
+                st.sidebar.success('JSON 歷史紀錄已成功載入！')
+                st.rerun()
+            else:
+                st.sidebar.error('JSON 檔案格式或欄位不符，請確認來源。')
+        except Exception as e:
+            st.sidebar.error(f'讀取 JSON 發生錯誤：{e}')
 
 st.sidebar.markdown('---')
 enable_validation_mode = st.sidebar.checkbox('🧪 啟用自我驗證資料產生器', value=False)
@@ -470,8 +471,36 @@ if enable_validation_mode:
     
     if st.sidebar.button('🎲 一鍵生成驗證數據', use_container_width=True):
         st.session_state.data = generate_verified_test_data(total_records, over_records, under_records)
+        st.session_state.active_view_tab = '📋 全部紀錄' # 生成數據後，自動切換到全部紀錄！
         st.toast(f'已成功生成 {total_records} 筆規律週期驗證資料！', icon='🎲')
         st.rerun()
+
+# ==========================================
+# TFDA 與 IEC 規範說明區塊
+# ==========================================
+st.sidebar.markdown('---')
+with st.sidebar.expander('📖 TFDA 醫材規範與 IEC 標準說明', expanded=False):
+    st.markdown("""
+    **衛福部食藥署 (TFDA)** 在審查血液透析機時，要求設備符合 **IEC 60601-2-16** 標準，以確保病患安全。
+    
+    * **精準度規範 (UF Control)**：
+      業界與標準最常採用的脫水誤差容許門檻為 **每小時 ±50 cc × 透析時間 或 機器設定UF值的 ±1% (兩者取其大)**。
+    * **相關標準參考**：
+      1. 國際標準：[IEC 60601-2-16 標準資訊](https://webstore.iec.ch/publication/2565)
+      2. TFDA 仿單查詢：[醫療器材許可證資料庫查詢系統](https://lmspiq.fda.gov.tw/web/) *(可於此查詢各廠牌透析機之原廠技術規格與精準度宣告)*
+    """)
+
+RENAME_MAP = {
+    '機器UF值': '💧 UF | 機器UF值',
+    '預期脫水': '💧 UF | 預期脫水',
+    '沖水總重': '💧 UF | 沖水總重',
+    '進食重量': '進食重量',
+    '洗後體重': '洗後(秤)',
+    '含輪椅': '🦽 含輪椅',
+    '輪椅重量': '輪椅重(kg)'
+}
+REVERSE_MAP = {v: k for k, v in RENAME_MAP.items()}
+EDITABLE_INTERNAL_COLS = ['洗前體重', '洗後體重', '含輪椅', '輪椅重量', '進食重量', '機器UF值', '沖水總重']
 
 # ==========================================
 # 主標題與警示
@@ -502,133 +531,52 @@ with col_badge:
 
 st.markdown('---')
 
-# ==========================================
-# 彈出式新增表單 (含輪椅重量設定)
-# ==========================================
-@st.dialog("📝 新增洗腎紀錄 (表單模式)")
-def add_record_dialog():
-    st.markdown("##### 📅 基本資訊")
-    col1, col2 = st.columns(2)
-    with col1:
-        date_input = st.date_input('日期')
-        shift_input = st.selectbox('班別', ['早班', '中班', '晚班'])
-    with col2:
-        weekday_map = {0: '週一', 1: '週二', 2: '週三', 3: '週四', 4: '週五', 5: '週六', 6: '週日'}
-        calculated_cycle = weekday_map[date_input.weekday()]
-        st.text_input('週期 (系統自動判定)', value=calculated_cycle, disabled=True)
-        
-        dry_wt = st.number_input('乾體重 (kg)', min_value=30.0, max_value=150.0, value=73.0, step=0.1, format="%.2f")
-
-    st.write("") 
-    st.markdown("##### ⚖️ 透析與體重數據")
-    col3, col4 = st.columns(2)
-    with col3:
-        pre_wt = st.number_input('洗前體重 (kg)', min_value=30.0, max_value=150.0, value=float(dry_wt + 1.0), step=0.1, format="%.2f")
-        post_wt = st.number_input('洗後秤重讀數 (kg)', min_value=30.0, max_value=150.0, value=float(dry_wt), step=0.1, format="%.2f", help="若連輪椅一起量測，請填寫磅秤顯示的總重量")
-        food_wt = st.number_input('進食重量 (kg)', min_value=0.0, max_value=2.0, value=0.0, step=0.1, format="%.2f", help="透析中進食或補充水分之總重量")
-    with col4:
-        machine_uf = st.number_input('機器UF值 (L/kg)', min_value=0.0, max_value=10.0, value=5.0, step=0.1, format="%.2f")
-        rinsing_wt = st.number_input('沖水/回血總重影響 (kg)', min_value=0.0, max_value=2.0, value=0.3, step=0.05, format="%.2f")
-
-    st.write("")
-    st.markdown("##### 🦽 輪椅重量校正 (選填)")
-    include_wheelchair = st.checkbox('洗後體重包含輪椅重量', value=False, help='勾選後，系統會自動從洗後秤重讀數中扣除輪椅重量以計算真實脫水')
-    wheelchair_wt = 0.0
-    if include_wheelchair:
-        wheelchair_wt = st.number_input('輪椅重量 (kg)', min_value=0.0, max_value=30.0, value=11.9, step=0.1, format="%.2f")
-
-    st.write("") 
-    st.info("💡 提示：儲存後，系統會自動依照日期與標準進行計算。")
-
-    if st.button('儲存紀錄', type='primary', use_container_width=True):
-        new_row = {
-            '日期': str(date_input),
-            '週期': calculated_cycle,
-            '班別': shift_input,
-            '乾體重': round(dry_wt, 2),
-            '洗前體重': round(pre_wt, 2),
-            '洗後體重': round(post_wt, 2),
-            '進食重量': round(food_wt, 2),
-            '機器UF值': round(machine_uf, 2),
-            '沖水總重': round(rinsing_wt, 2),
-            '含輪椅': include_wheelchair,
-            '輪椅重量': round(wheelchair_wt, 2),
-            '預期脫水': 0.0,
-            '實際脫水': 0.0,
-            '誤差值': 0.0,
-            '狀態': ''
-        }
-        st.session_state.data = pd.concat(
-            [st.session_state.data, pd.DataFrame([new_row])], ignore_index=True
-        )
-        st.session_state.show_success_toast = True
-        st.rerun() 
-
-st.sidebar.markdown('---')
-st.sidebar.header('📝 資料登錄')
-if st.sidebar.button('➕ 點此開啟表單新增', use_container_width=True):
-    add_record_dialog()
-
 if st.session_state.pop('show_success_toast', False):
     st.toast('紀錄已成功新增！', icon='✅')
 
 # ==========================================
-# TFDA 與 IEC 規範說明區塊 (已新增資料庫查詢連結)
+# 主畫面整合式視圖 (預設跳轉邏輯優化)
 # ==========================================
-st.sidebar.markdown('---')
-with st.sidebar.expander('📖 TFDA 醫材規範與 IEC 標準說明', expanded=False):
-    st.markdown("""
-    **衛福部食藥署 (TFDA)** 在審查血液透析機時，要求設備符合 **IEC 60601-2-16** 標準，以確保病患安全。
-    
-    * **精準度規範 (UF Control)**：
-      業界與標準最常採用的脫水誤差容許門檻為 **每小時 ±50 cc × 透析時間 或 機器設定UF值的 ±1% (兩者取其大)**。
-    * **相關標準參考**：
-      1. 國際標準：[IEC 60601-2-16 標準資訊](https://webstore.iec.ch/publication/2565)
-      2. TFDA 仿單查詢：[醫療器材許可證資料庫查詢系統](https://lmspiq.fda.gov.tw/web/) *(可於此查詢各廠牌透析機之原廠技術規格與精準度宣告)*
-    """)
+tab_options = ['📋 全部紀錄', '📝 新增紀錄', '⚠️ 異常數據', '📊 資料分布圖']
 
-RENAME_MAP = {
-    '機器UF值': '💧 UF | 機器UF值',
-    '預期脫水': '💧 UF | 預期脫水',
-    '沖水總重': '💧 UF | 沖水總重',
-    '進食重量': '進食重量',
-    '洗後體重': '洗後(秤)',
-    '含輪椅': '🦽 含輪椅',
-    '輪椅重量': '輪椅重(kg)'
-}
-REVERSE_MAP = {v: k for k, v in RENAME_MAP.items()}
-EDITABLE_INTERNAL_COLS = ['洗前體重', '洗後體重', '含輪椅', '輪椅重量', '進食重量', '機器UF值', '沖水總重']
+# 確保 active_view_tab 在合法選項內
+if st.session_state.get('active_view_tab') not in tab_options:
+    st.session_state.active_view_tab = '📋 全部紀錄'
 
-# ==========================================
-# 主畫面數據分析面板
-# ==========================================
-st.subheader('📊 數據分析檢視面板')
+current_index = tab_options.index(st.session_state.active_view_tab)
 
-if st.session_state.data.empty:
-    st.info('目前尚無資料，請從左側點擊「開啟表單新增」或啟用自我驗證資料產生器來建立測試數據。')
-else:
-    df = st.session_state.data.copy()
+view_option = st.radio(
+    '操作與檢視面板',
+    tab_options,
+    index=current_index,
+    horizontal=True,
+    key='main_radio_selection'
+)
 
-    view_option = st.radio(
-        '選擇顯示視圖',
-        ['全部', '異常數據', '資料分布圖'],
-        horizontal=True,
-    )
+# 使用者點擊切換時，同步更新至 session_state
+st.session_state.active_view_tab = view_option
 
-    column_order_list = [
-        '日期', '週期', '班別', '乾體重', '洗前體重', 
-        RENAME_MAP['洗後體重'], 
-        RENAME_MAP['含輪椅'],
-        RENAME_MAP['輪椅重量'],
-        RENAME_MAP['進食重量'],
-        RENAME_MAP['機器UF值'], 
-        RENAME_MAP['預期脫水'], 
-        RENAME_MAP['沖水總重'], 
-        '實際脫水', '誤差值', '狀態'
-    ]
+st.write("") 
 
-    if view_option == '全部':
-        st.markdown('### 完整歷史紀錄')
+df = st.session_state.data.copy()
+
+if view_option == '📋 全部紀錄':
+    if df.empty:
+        st.info('目前尚無資料，請切換至「📝 新增紀錄」填寫表單，或從左側匯入 JSON / 生成測試資料。')
+    else:
+        st.markdown('### 📋 完整歷史紀錄')
+        
+        column_order_list = [
+            '日期', '週期', '班別', '乾體重', '洗前體重', 
+            RENAME_MAP['洗後體重'], 
+            RENAME_MAP['含輪椅'],
+            RENAME_MAP['輪椅重量'],
+            RENAME_MAP['進食重量'],
+            RENAME_MAP['機器UF值'], 
+            RENAME_MAP['預期脫水'], 
+            RENAME_MAP['沖水總重'], 
+            '實際脫水', '誤差值', '狀態'
+        ]
         
         display_df = df.rename(columns=RENAME_MAP)[column_order_list].copy()
         display_df.insert(0, '項次', range(1, len(display_df) + 1))
@@ -688,13 +636,87 @@ else:
         fig.update_traces(selector=dict(name='實際脫水'), line=dict(color='#38BDF8', width=3))
         st.plotly_chart(fig, use_container_width=True)
 
-    elif view_option == '異常數據':
+elif view_option == '📝 新增紀錄':
+    st.markdown("### 📝 新增洗腎紀錄")
+    st.markdown("##### 📅 基本資訊")
+    col1, col2 = st.columns(2)
+    with col1:
+        date_input = st.date_input('日期')
+        shift_input = st.selectbox('班別', ['早班', '中班', '晚班'])
+    with col2:
+        weekday_map = {0: '週一', 1: '週二', 2: '週三', 3: '週四', 4: '週五', 5: '週六', 6: '週日'}
+        calculated_cycle = weekday_map[date_input.weekday()]
+        st.text_input('週期 (系統自動判定)', value=calculated_cycle, disabled=True)
+        
+        dry_wt = st.number_input('乾體重 (kg)', min_value=30.0, max_value=150.0, value=73.0, step=0.1, format="%.2f")
+
+    st.write("") 
+    st.markdown("##### ⚖️ 透析與體重數據")
+    col3, col4 = st.columns(2)
+    with col3:
+        pre_wt = st.number_input('洗前體重 (kg)', min_value=30.0, max_value=150.0, value=float(dry_wt + 1.0), step=0.1, format="%.2f")
+        post_wt = st.number_input('洗後秤重讀數 (kg)', min_value=30.0, max_value=150.0, value=float(dry_wt), step=0.1, format="%.2f", help="若連輪椅一起量測，請填寫磅秤顯示的總重量")
+        food_wt = st.number_input('進食重量 (kg)', min_value=0.0, max_value=2.0, value=0.0, step=0.1, format="%.2f", help="透析中進食或補充水分之總重量")
+    with col4:
+        machine_uf = st.number_input('機器UF值 (L/kg)', min_value=0.0, max_value=10.0, value=5.0, step=0.1, format="%.2f")
+        rinsing_wt = st.number_input('沖水/回血總重影響 (kg)', min_value=0.0, max_value=2.0, value=0.3, step=0.05, format="%.2f")
+
+    st.write("")
+    st.markdown("##### 🦽 輪椅重量校正 (選填)")
+    include_wheelchair = st.checkbox('洗後體重包含輪椅重量', value=False, help='勾選後，系統會自動從洗後秤重讀數中扣除輪椅重量以計算真實脫水')
+    wheelchair_wt = 0.0
+    if include_wheelchair:
+        wheelchair_wt = st.number_input('輪椅重量 (kg)', min_value=0.0, max_value=30.0, value=11.9, step=0.1, format="%.2f")
+
+    st.write("") 
+    st.info("💡 提示：儲存後，系統會自動跳轉至「📋 全部紀錄」展示新增的算式與結果。")
+
+    if st.button('儲存紀錄', type='primary', use_container_width=True):
+        new_row = {
+            '日期': str(date_input),
+            '週期': calculated_cycle,
+            '班別': shift_input,
+            '乾體重': round(dry_wt, 2),
+            '洗前體重': round(pre_wt, 2),
+            '洗後體重': round(post_wt, 2),
+            '進食重量': round(food_wt, 2),
+            '機器UF值': round(machine_uf, 2),
+            '沖水總重': round(rinsing_wt, 2),
+            '含輪椅': include_wheelchair,
+            '輪椅重量': round(wheelchair_wt, 2),
+            '預期脫水': 0.0,
+            '實際脫水': 0.0,
+            '誤差值': 0.0,
+            '狀態': ''
+        }
+        st.session_state.data = pd.concat(
+            [st.session_state.data, pd.DataFrame([new_row])], ignore_index=True
+        )
+        st.session_state.show_success_toast = True
+        st.session_state.active_view_tab = '📋 全部紀錄' # 儲存成功後自動跳轉全部紀錄！
+        st.rerun() 
+
+elif view_option == '⚠️ 異常數據':
+    if df.empty:
+        st.info('目前尚無資料，請先新增紀錄或匯入資料。')
+    else:
         st.markdown('### ⚠️ 超出容許誤差標準的異常紀錄')
         abnormal_df = df[df['狀態'].str.contains('異常')]
         if abnormal_df.empty:
             st.success('目前的紀錄中沒有發現異常數據的場次。')
         else:
-            # 這裡加上了最重要的 .reset_index(drop=True)，修復 IndexError/KeyError！
+            column_order_list = [
+                '日期', '週期', '班別', '乾體重', '洗前體重', 
+                RENAME_MAP['洗後體重'], 
+                RENAME_MAP['含輪椅'],
+                RENAME_MAP['輪椅重量'],
+                RENAME_MAP['進食重量'],
+                RENAME_MAP['機器UF值'], 
+                RENAME_MAP['預期脫水'], 
+                RENAME_MAP['沖水總重'], 
+                '實際脫水', '誤差值', '狀態'
+            ]
+            
             disp_abn_df = abnormal_df.rename(columns=RENAME_MAP)[column_order_list].copy().reset_index(drop=True)
             disp_abn_df.insert(0, '項次', range(1, len(disp_abn_df) + 1))
             disp_abn_df['🗑️ 點選刪除'] = False
@@ -760,7 +782,10 @@ else:
             )
             st.plotly_chart(fig_abnormal, use_container_width=True)
 
-    elif view_option == '資料分布圖':
+elif view_option == '📊 資料分布圖':
+    if df.empty:
+        st.info('目前尚無資料，請先新增紀錄或匯入資料。')
+    else:
         st.markdown('### 📊 脫水狀態資料分布圖與偏差分析')
 
         col1, col2 = st.columns(2)
