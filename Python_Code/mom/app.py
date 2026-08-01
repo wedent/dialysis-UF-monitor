@@ -175,7 +175,8 @@ if tolerance_mode == 'IEC 60601-2-16 標準 (時間基準 或 1%)':
     iec_time_hr = st.sidebar.number_input('預設透析時間 (小時)', min_value=1.0, max_value=8.0, value=4.0, step=0.5, help="透析時間會直接影響總容許誤差值")
     iec_base_err = st.sidebar.number_input('每小時容許誤差 (g/hr)', min_value=10, max_value=100, value=50, step=10, help="例如：洗 4 小時 × 50g/hr = 200g 的絕對容許誤差")
 elif tolerance_mode == '固定重量 (g)':
-    tolerance_val = st.sidebar.slider(
+    # 這裡改成 number_input
+    tolerance_val = st.sidebar.number_input(
         '自訂容許誤差值 (g)', min_value=0.01, max_value=2000.00, value=200.00, step=0.01, format="%.2f"
     )
 elif tolerance_mode == '預期脫水量的百分比 (%)':
